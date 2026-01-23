@@ -223,6 +223,38 @@ def register_commands(bot: WagmiBot):
         embed.add_field(name="Total Tracked", value=str(total))
         await interaction.response.send_message(embed=embed)
 
+    @bot.tree.command(name='company', description='Search for the 5 most recent jobs at a specific company')
+    @discord.app_commands.describe(name='Company name to search for')
+    async def company_slash(interaction: discord.Interaction, name: str):
+        if not await check_channel(interaction): return
+        await interaction.response.defer()
+        try:
+            jobs = await asyncio.to_thread(bot.job_scraper.fetch_jobs, only_today=False)
+            company_jobs = [j for j in jobs if name.lower() in j.company.lower()]
+            if not company_jobs:
+                await interaction.followup.send(f"❌ No jobs found for **{name}**.")
+                return
+            latest_5 = company_jobs[:5]
+            embed = discord.Embed(title=f"🏢 Recent Jobs at {name}", color=discord.Color.blue(), timestamp=datetime.now())
+            for i, job in enumerate(latest_5, 1):
+                loc = job.location or "Not specified"
+                val = f"📍 {loc} ({job.date_posted})\n🔗 [Apply]({job.link})"
+                embed.add_field(name=f"{i}. {job.title}", value=val, inline=False)
+            await interaction.followup.send(embed=embed)
+        except Exception:
+            await interaction.followup.send("❌ Error searching for jobs.")
+
+    @bot.tree.command(name='fetch', description='Manually trigger a job search and post new ones')
+    async def fetch_slash(interaction: discord.Interaction):
+        if not await check_channel(interaction): return
+        await interaction.response.send_message("🔄 Manually triggering job fetch...")
+        await bot.fetch_and_post_jobs()
+
+    @bot.tree.command(name='test', description='Check if the bot is alive and responsive')
+    async def test_slash(interaction: discord.Interaction):
+        if not await check_channel(interaction): return
+        await interaction.response.send_message("✅ Bot is working!")
+
     # PREFIX COMMANDS (Fallbacks)
     @bot.command(name='sync')
     @commands.is_owner()
@@ -251,6 +283,26 @@ def register_commands(bot: WagmiBot):
                 await ctx.send(embed=embed)
             except Exception:
                 await ctx.send("❌ Error fetching jobs.")
+
+    @bot.command(name='company')
+    async def company_prefix(ctx, *, name: str):
+        if not await check_channel(ctx): return
+        async with ctx.typing():
+            try:
+                jobs = await asyncio.to_thread(bot.job_scraper.fetch_jobs, only_today=False)
+                company_jobs = [j for j in jobs if name.lower() in j.company.lower()]
+                if not company_jobs:
+                    await ctx.send(f"❌ No jobs found for **{name}**.")
+                    return
+                latest_5 = company_jobs[:5]
+                embed = discord.Embed(title=f"🏢 Recent Jobs at {name}", color=discord.Color.blue(), timestamp=datetime.now())
+                for i, job in enumerate(latest_5, 1):
+                    loc = job.location or "Not specified"
+                    val = f"📍 {loc} ({job.date_posted})\n🔗 [Apply]({job.link})"
+                    embed.add_field(name=f"{i}. {job.title}", value=val, inline=False)
+                await ctx.send(embed=embed)
+            except Exception:
+                await ctx.send("❌ Error searching for jobs.")
 
     @bot.command(name='fetch')
     async def fetch_prefix(ctx):
