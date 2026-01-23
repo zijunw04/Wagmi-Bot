@@ -45,10 +45,13 @@ def home():
     return "I'm alive!"
 
 def run():
-    app.run(host='0.0.0.0', port=8080)
+    # Use PORT environment variable for Render, default to 8080
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host='0.0.0.0', port=port)
 
 def keep_alive():
     t = Thread(target=run)
+    t.daemon = True # Ensure thread exits when main program does
     t.start()
 
 
@@ -264,6 +267,38 @@ async def latest_command(interaction: discord.Interaction):
         print(f"Error in latest_command: {e}")
         await interaction.followup.send("❌ An error occurred while fetching the latest jobs.")
 
+@bot.command(name='latest')
+async def latest_prefix(ctx):
+    """Fallback prefix command for latest."""
+    if COMMANDS_CHANNEL_ID != 0 and ctx.channel.id != COMMANDS_CHANNEL_ID:
+        return
+    
+    async with ctx.typing():
+        try:
+            jobs = await asyncio.to_thread(job_scraper.fetch_jobs, only_today=False)
+            if not jobs:
+                await ctx.send("❌ No jobs found matching the criteria.")
+                return
+            
+            latest_5 = jobs[:5]
+            embed = discord.Embed(
+                title="🆕 Latest Tech Internships",
+                description="Here are the 5 most recently posted roles:",
+                color=discord.Color.blue(),
+                timestamp=datetime.now()
+            )
+            for i, job in enumerate(latest_5, 1):
+                location = job.location if job.location else "Not specified"
+                date_str = f" ({job.date_posted})" if job.date_posted else ""
+                value = f"📍 {location}{date_str}\n🔗 [Apply Here]({job.link})"
+                embed.add_field(name=f"{i}. {job.company} - {job.title}", value=value, inline=False)
+            
+            embed.set_footer(text="Use !stats for more info")
+            await ctx.send(embed=embed)
+        except Exception as e:
+            print(f"Error in latest_prefix: {e}")
+            await ctx.send("❌ An error occurred while fetching the latest jobs.")
+
 
 @bot.tree.command(name='company', description='List recent job postings from a specific company')
 @discord.app_commands.describe(company="The name of the company to search for")
@@ -331,6 +366,51 @@ async def company_command(interaction: discord.Interaction, company: str):
         print(f"Error in company_command: {e}")
         await interaction.followup.send("❌ An error occurred while searching for company jobs.")
 
+@bot.command(name='company')
+async def company_prefix(ctx, *, company: str):
+    """Fallback prefix command for company."""
+    if COMMANDS_CHANNEL_ID != 0 and ctx.channel.id != COMMANDS_CHANNEL_ID:
+        return
+    
+    async with ctx.typing():
+        try:
+            jobs = await asyncio.to_thread(job_scraper.fetch_jobs, only_today=False)
+            if not jobs:
+                await ctx.send("❌ No jobs found.")
+                return
+
+            company_query = company.strip()
+            pattern = re.compile(rf'\b{re.escape(company_query)}\b', re.IGNORECASE)
+            filtered_jobs = [job for job in jobs if pattern.search(job.company)]
+            
+            if not filtered_jobs:
+                company_lower = company_query.lower()
+                filtered_jobs = [job for job in jobs if company_lower in job.company.lower()]
+            
+            if not filtered_jobs:
+                await ctx.send(f"❌ No jobs found for **{company}**.")
+                return
+            
+            display_jobs = filtered_jobs[:10]
+            embed = discord.Embed(
+                title=f"🏢 Jobs at {display_jobs[0].company}",
+                description=f"Here are the most recent postings matching '**{company}**':",
+                color=discord.Color.blue(),
+                timestamp=datetime.now()
+            )
+            for i, job in enumerate(display_jobs, 1):
+                location = job.location if job.location else "Not specified"
+                date_str = f" ({job.date_posted})" if job.date_posted else ""
+                value = f"📍 {location}{date_str}\n🔗 [Apply Here]({job.link})"
+                embed.add_field(name=f"{i}. {job.title}", value=value, inline=False)
+            
+            footer_text = f"Showing 10 of {len(filtered_jobs)} total." if len(filtered_jobs) > 10 else f"Total: {len(filtered_jobs)} job(s)."
+            embed.set_footer(text=footer_text)
+            await ctx.send(embed=embed)
+        except Exception as e:
+            print(f"Error in company_prefix: {e}")
+            await ctx.send("❌ An error occurred while searching.")
+
 
 @bot.tree.command(name='fetch', description='Manually fetch and post new jobs (today only)')
 async def fetch_command(interaction: discord.Interaction):
@@ -369,6 +449,37 @@ async def stats_command(interaction: discord.Interaction):
     embed.set_footer(text=f"Last reset: {stats['last_reset_date']}")
     
     await interaction.response.send_message(embed=embed)
+
+@bot.command(name='stats')
+async def stats_prefix(ctx):
+    """Fallback prefix command for stats."""
+    if COMMANDS_CHANNEL_ID != 0 and ctx.channel.id != COMMANDS_CHANNEL_ID:
+        return
+    reset_daily_stats()
+    jobs_history = load_jobs_history()
+    total_jobs = len(jobs_history)
+    
+    embed = discord.Embed(title="📊 Job Bot Statistics", color=discord.Color.green())
+    embed.add_field(name="Jobs Posted Today", value=str(stats['total_posted_today']), inline=True)
+    embed.add_field(name="Total Jobs Tracked", value=str(total_jobs), inline=True)
+    embed.set_footer(text=f"Last reset: {stats['last_reset_date']}")
+    await ctx.send(embed=embed)
+
+@bot.command(name='test')
+async def test_prefix(ctx):
+    """Fallback prefix command for test."""
+    if COMMANDS_CHANNEL_ID != 0 and ctx.channel.id != COMMANDS_CHANNEL_ID:
+        return
+    await ctx.send("✅ Bot is working (prefix command)!")
+
+@bot.command(name='fetch')
+async def fetch_prefix(ctx):
+    """Fallback prefix command for fetch."""
+    if COMMANDS_CHANNEL_ID != 0 and ctx.channel.id != COMMANDS_CHANNEL_ID:
+        return
+    await ctx.send("🔄 Checking for new jobs posted today...")
+    await fetch_and_post_jobs()
+    await ctx.send("✅ Check completed!")
 
 
 @bot.tree.command(name='test', description='Test command to verify bot is working')
