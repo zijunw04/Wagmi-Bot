@@ -518,13 +518,18 @@ if __name__ == '__main__':
     print("Pre-start cooldown (5 seconds)...")
     time.sleep(5)
     
+    async def runner():
+        async with bot:
+            await bot.start(DISCORD_TOKEN)
+
     keep_alive()
     
     while True:
         try:
             print(f"Attempting to log in to Discord...")
-            bot.run(DISCORD_TOKEN)
-            # If bot.run() exits normally (e.g. log out), break the loop
+            import asyncio
+            asyncio.run(runner())
+            # If runner() exits normally, break the loop
             break
         except discord.errors.HTTPException as e:
             if e.status == 429:
@@ -537,9 +542,13 @@ if __name__ == '__main__':
                 print(f"Discord HTTP Error: {e}")
                 time.sleep(30)
         except Exception as e:
-            print(f"Unexpected error running bot: {e}")
-            import traceback
-            traceback.print_exc()
-            time.sleep(60)
+            if "Session is closed" in str(e):
+                print("Session was closed, retrying with fresh session...")
+            else:
+                print(f"Unexpected error running bot: {e}")
+                import traceback
+                traceback.print_exc()
+            time.sleep(retry_delay)
+            retry_delay = min(retry_delay * 2, max_delay)
         
         print("Restarting bot loop...")
