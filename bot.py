@@ -35,6 +35,7 @@ stats = {
     'total_posted_today': 0,
     'last_reset_date': datetime.now().date().isoformat()
 }
+initialized = False
 
 
 # Flask Keep-Alive Server
@@ -189,16 +190,12 @@ async def fetch_and_post_jobs():
 @bot.event
 async def on_ready():
     """Called when the bot is ready."""
+    global initialized
+    if initialized:
+        return
+        
     print(f'{bot.user} has logged in!')
     print(f'Bot is in {len(bot.guilds)} guild(s)')
-    
-    # Sync slash commands
-    try:
-        print("Syncing commands...")
-        synced = await bot.tree.sync()
-        print(f"Synced {len(synced)} command(s): {[c.name for c in synced]}")
-    except Exception as e:
-        print(f"Failed to sync commands: {e}")
     
     # Schedule hourly job fetching
     scheduler.add_job(
@@ -211,8 +208,23 @@ async def on_ready():
     scheduler.start()
     print("Scheduler started - will fetch jobs every hour")
     
+    initialized = True
+    
     # Fetch jobs immediately on startup
     await fetch_and_post_jobs()
+
+@bot.command(name='sync')
+@commands.is_owner()
+async def sync_commands(ctx):
+    """Manually sync slash commands. Only accessible by bot owner."""
+    try:
+        print("Syncing commands...")
+        synced = await bot.tree.sync()
+        await ctx.send(f"✅ Synced {len(synced)} command(s)!")
+        print(f"Synced {len(synced)} command(s): {[c.name for c in synced]}")
+    except Exception as e:
+        print(f"Failed to sync commands: {e}")
+        await ctx.send(f"❌ Failed to sync: {e}")
 
 async def check_commands_channel(interaction: discord.Interaction) -> bool:
     """Check if the command is being used in the correct channel."""
