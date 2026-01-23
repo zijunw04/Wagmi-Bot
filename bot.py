@@ -12,6 +12,11 @@ from flask import Flask
 from threading import Thread
 from dotenv import load_dotenv
 from job_scraper import JobScraper, Job
+import logging
+
+# Setup logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger('discord')
 
 # Load environment variables
 load_dotenv()
@@ -274,6 +279,7 @@ async def start_bot():
         
         try:
             async with bot_instance:
+                print("Connecting to Discord gateway...")
                 await bot_instance.start(DISCORD_TOKEN)
             break # If it exits cleanly
         except discord.errors.HTTPException as e:
