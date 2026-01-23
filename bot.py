@@ -273,31 +273,32 @@ async def start_bot():
     keep_alive()
     
     while True:
-        print(f"Attempting to start Wagmi Bot...")
+        logger.info(f"Attempting to start Wagmi Bot instance...")
         bot_instance = WagmiBot()
         register_commands(bot_instance)
         
         try:
             async with bot_instance:
-                print("Connecting to Discord gateway...")
+                logger.info("Connecting to Discord gateway...")
                 await bot_instance.start(DISCORD_TOKEN)
             break # If it exits cleanly
         except discord.errors.HTTPException as e:
             if e.status == 429:
-                print(f"CRITICAL: 429 Too Many Requests (Rate Limited).")
-                print(f"Wait before retry: {retry_delay}s")
+                logger.error(f"CRITICAL: 429 Too Many Requests (Rate Limited).")
+                logger.info(f"Exponential backoff: waiting {retry_delay}s before next attempt.")
                 await asyncio.sleep(retry_delay)
                 retry_delay = min(retry_delay * 2, max_delay)
             else:
-                print(f"Discord HTTP Error ({e.status}): {e}")
+                logger.error(f"Discord HTTP Error ({e.status}): {e}")
                 await asyncio.sleep(30)
         except Exception as e:
-            print(f"Bot execution error: {e}")
+            logger.error(f"Bot connection or execution error: {type(e).__name__}: {e}")
+            if "Session is closed" in str(e):
+                logger.info("Internal session reset required...")
             await asyncio.sleep(retry_delay)
             retry_delay = min(retry_delay * 2, max_delay)
         
-        print("Bot instance closed. Cleaning up and restarting...")
-        # Clear the instance to ensure fresh session on next loop
+        logger.info("Bot instance closed. Cleaning up and preparing for restart...")
         del bot_instance
 
 if __name__ == '__main__':
