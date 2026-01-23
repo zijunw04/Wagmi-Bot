@@ -209,9 +209,8 @@ async def on_ready():
     print("Scheduler started - will fetch jobs every hour")
     
     initialized = True
-    
-    # Fetch jobs immediately on startup
-    await fetch_and_post_jobs()
+    print("Bot is ready and waiting for commands.")
+    # Removed immediate fetch_and_post_jobs() to reduce startup noise
 
 @bot.command(name='sync')
 @commands.is_owner()
@@ -512,6 +511,11 @@ if __name__ == '__main__':
         exit(1)
     
     try:
+        import time
+        # Small delay to avoid hammering Discord if Render restarts it quickly
+        print("Starting bot in 5 seconds...")
+        time.sleep(5)
+        
         keep_alive()
         bot.run(DISCORD_TOKEN)
     except KeyboardInterrupt:
@@ -521,3 +525,5 @@ if __name__ == '__main__':
         print(f"Error running bot: {e}")
         import traceback
         traceback.print_exc()
+        # Sleep on error before Render restarts the process
+        time.sleep(30)
