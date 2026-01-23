@@ -510,20 +510,36 @@ if __name__ == '__main__':
         print("ERROR: POSTINGS_CHANNEL_ID not found in environment variables!")
         exit(1)
     
-    try:
-        import time
-        # Small delay to avoid hammering Discord if Render restarts it quickly
-        print("Starting bot in 5 seconds...")
-        time.sleep(5)
+    import time
+    retry_delay = 30  # Start with 30 seconds
+    max_delay = 600   # Max 10 minutes
+    
+    # Small delay to avoid hammering Discord if Render restarts it quickly
+    print("Pre-start cooldown (5 seconds)...")
+    time.sleep(5)
+    
+    keep_alive()
+    
+    while True:
+        try:
+            print(f"Attempting to log in to Discord...")
+            bot.run(DISCORD_TOKEN)
+            # If bot.run() exits normally (e.g. log out), break the loop
+            break
+        except discord.errors.HTTPException as e:
+            if e.status == 429:
+                print(f"CRITICAL: 429 Too Many Requests (Rate Limited).")
+                print(f"Retrying in {retry_delay} seconds...")
+                time.sleep(retry_delay)
+                # Exponential backoff
+                retry_delay = min(retry_delay * 2, max_delay)
+            else:
+                print(f"Discord HTTP Error: {e}")
+                time.sleep(30)
+        except Exception as e:
+            print(f"Unexpected error running bot: {e}")
+            import traceback
+            traceback.print_exc()
+            time.sleep(60)
         
-        keep_alive()
-        bot.run(DISCORD_TOKEN)
-    except KeyboardInterrupt:
-        print("\nShutting down bot...")
-        scheduler.shutdown()
-    except Exception as e:
-        print(f"Error running bot: {e}")
-        import traceback
-        traceback.print_exc()
-        # Sleep on error before Render restarts the process
-        time.sleep(30)
+        print("Restarting bot loop...")
