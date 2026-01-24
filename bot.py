@@ -13,6 +13,7 @@ from threading import Thread
 from dotenv import load_dotenv
 from job_scraper import JobScraper, Job
 from leetcode_scraper import LeetCodeScraper, LeetCodeProblem
+from database_manager import DatabaseManager
 import logging
 
 # Setup logging
@@ -27,6 +28,7 @@ load_dotenv()
 
 # Bot configuration
 DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')
+DATABASE_URL = os.getenv('DATABASE_URL')
 POSTINGS_CHANNEL_ID = int(os.getenv('POSTINGS_CHANNEL_ID', 0))
 COMMANDS_CHANNEL_ID = int(os.getenv('COMMANDS_CHANNEL_ID', 0))
 JOBS_HISTORY_FILE = 'jobs_history.json'
@@ -68,33 +70,39 @@ class WagmiBot(commands.Bot):
         self.scheduler = AsyncIOScheduler()
         self.job_scraper = JobScraper()
         self.leetcode_scraper = LeetCodeScraper()
+        self.db = DatabaseManager(DATABASE_URL)
+        
         self.stats = {
             'total_posted_today': 0,
             'last_reset_date': datetime.now().date().isoformat()
         }
         self.initialized = False
 
-    def load_jobs_history(self) -> Dict[str, bool]:
-        """Load previously posted jobs from JSON file."""
-        try:
-            if os.path.exists(JOBS_HISTORY_FILE):
+    def migrate_json_to_db(self):
+        """One-time migration of jobs_history.json to the database."""
+        if os.path.exists(JOBS_HISTORY_FILE):
+            logger.info("Found legacy jobs_history.json. Migrating to database...")
+            try:
                 with open(JOBS_HISTORY_FILE, 'r', encoding='utf-8') as f:
-                    return json.load(f)
-        except Exception as e:
-            logger.error(f"Error loading jobs history: {e}")
-        return {}
-
-    def save_jobs_history(self, jobs_history: Dict[str, bool]):
-        """Save posted jobs to JSON file."""
-        try:
-            with open(JOBS_HISTORY_FILE, 'w', encoding='utf-8') as f:
-                json.dump(jobs_history, f, indent=2, ensure_ascii=False)
-        except Exception as e:
-            logger.error(f"Error saving jobs history: {e}")
-
-    def get_job_key(self, job: Job) -> str:
-        """Generate a unique key for a job to track duplicates."""
-        return f"{job.company}|{job.title}|{job.location}"
+                    history = json.load(f)
+                
+                count = 0
+                for job_key in history.keys():
+                    # Format: company|title|location
+                    parts = job_key.split('|')
+                    if len(parts) == 3:
+                        company, title, location = parts
+                        # Use 0.0 for legacy items
+                        job = Job(company=company, title=title, location=location, timestamp=0.0)
+                        if not self.db.is_duplicate(job):
+                            self.db.add_job(job)
+                            count += 1
+                
+                logger.info(f"Successfully migrated {count} records to DB.")
+                os.rename(JOBS_HISTORY_FILE, f"{JOBS_HISTORY_FILE}.bak")
+                logger.info(f"Renamed {JOBS_HISTORY_FILE} to {JOBS_HISTORY_FILE}.bak")
+            except Exception as e:
+                logger.error(f"Migration failed: {e}")
 
     def reset_daily_stats(self):
         today = datetime.now().date().isoformat()
@@ -121,7 +129,7 @@ class WagmiBot(commands.Bot):
             embed.add_field(name="📅 Date Posted", value=job.date_posted, inline=True)
         if valid_url:
             embed.add_field(name="🔗 Application Link", value=f"[Apply Here]({valid_url})", inline=False)
-        embed.set_footer(text="Job Bot | Hourly Updates")
+        embed.set_footer(text="Job Bot | 30m Updates")
         return embed
 
     async def fetch_and_post_jobs(self):
@@ -132,7 +140,6 @@ class WagmiBot(commands.Bot):
                 logger.error(f"Channel with ID {POSTINGS_CHANNEL_ID} not found!")
                 return
             
-            jobs_history = self.load_jobs_history()
             logger.info("Fetching today's jobs from GitHub...")
             jobs = await asyncio.to_thread(self.job_scraper.fetch_jobs, only_today=True)
             
@@ -142,19 +149,18 @@ class WagmiBot(commands.Bot):
             
             new_jobs_count = 0
             for job in jobs:
-                job_key = self.get_job_key(job)
-                if job_key in jobs_history:
+                # Deduplication logic: considers company, title, location, AND timestamp
+                if self.db.is_duplicate(job):
                     continue
                 
                 embed = self.create_job_embed(job)
                 await channel.send(embed=embed)
                 
-                jobs_history[job_key] = True
+                self.db.add_job(job)
                 new_jobs_count += 1
                 self.stats['total_posted_today'] += 1
                 await asyncio.sleep(1)
             
-            self.save_jobs_history(jobs_history)
             if new_jobs_count > 0:
                 logger.info(f"Posted {new_jobs_count} new job(s)!")
             else:
@@ -167,16 +173,19 @@ class WagmiBot(commands.Bot):
             return
         logger.info(f'{self.user} has logged in!')
         
+        # Run migration once on startup
+        self.migrate_json_to_db()
+        
         self.scheduler.add_job(
             self.fetch_and_post_jobs,
             'interval',
-            hours=1,
+            minutes=30,
             id='fetch_jobs',
             replace_existing=True
         )
         self.scheduler.start()
         self.initialized = True
-        logger.info("Bot is ready and scheduler started.")
+        logger.info("Bot is ready and scheduler started (30 minute intervals).")
 
     async def setup_hook(self):
         logger.info("Bot setup hook running...")
@@ -288,7 +297,7 @@ def register_commands(bot: WagmiBot):
     async def stats_slash(interaction: discord.Interaction):
         if not await check_channel(interaction): return
         bot.reset_daily_stats()
-        total = len(bot.load_jobs_history())
+        total = bot.db.get_total_count()
         embed = discord.Embed(title="📊 Job Bot Statistics", color=discord.Color.green())
         embed.add_field(name="Posted Today", value=str(bot.stats['total_posted_today']))
         embed.add_field(name="Total Tracked", value=str(total))
