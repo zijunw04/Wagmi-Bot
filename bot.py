@@ -12,10 +12,14 @@ from flask import Flask
 from threading import Thread
 from dotenv import load_dotenv
 from job_scraper import JobScraper, Job
+from leetcode_scraper import LeetCodeScraper, LeetCodeProblem
 import logging
 
 # Setup logging
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger('discord')
 
 # Load environment variables
@@ -27,29 +31,7 @@ POSTINGS_CHANNEL_ID = int(os.getenv('POSTINGS_CHANNEL_ID', 0))
 COMMANDS_CHANNEL_ID = int(os.getenv('COMMANDS_CHANNEL_ID', 0))
 JOBS_HISTORY_FILE = 'jobs_history.json'
 
-# --- GLOBAL UTILS ---
-
-def load_jobs_history() -> Dict[str, bool]:
-    """Load previously posted jobs from JSON file."""
-    try:
-        if os.path.exists(JOBS_HISTORY_FILE):
-            with open(JOBS_HISTORY_FILE, 'r', encoding='utf-8') as f:
-                return json.load(f)
-    except Exception as e:
-        print(f"Error loading jobs history: {e}")
-    return {}
-
-def save_jobs_history(jobs_history: Dict[str, bool]):
-    """Save posted jobs to JSON file."""
-    try:
-        with open(JOBS_HISTORY_FILE, 'w', encoding='utf-8') as f:
-            json.dump(jobs_history, f, indent=2, ensure_ascii=False)
-    except Exception as e:
-        print(f"Error saving jobs history: {e}")
-
-def get_job_key(job: Job) -> str:
-    """Generate a unique key for a job to track duplicates."""
-    return f"{job.company}|{job.title}|{job.location}"
+# --- UTILS ---
 
 def is_valid_url(url: Optional[str]) -> bool:
     """Check if a URL is a valid HTTP/HTTPS URL."""
@@ -85,11 +67,34 @@ class WagmiBot(commands.Bot):
         
         self.scheduler = AsyncIOScheduler()
         self.job_scraper = JobScraper()
+        self.leetcode_scraper = LeetCodeScraper()
         self.stats = {
             'total_posted_today': 0,
             'last_reset_date': datetime.now().date().isoformat()
         }
         self.initialized = False
+
+    def load_jobs_history(self) -> Dict[str, bool]:
+        """Load previously posted jobs from JSON file."""
+        try:
+            if os.path.exists(JOBS_HISTORY_FILE):
+                with open(JOBS_HISTORY_FILE, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+        except Exception as e:
+            logger.error(f"Error loading jobs history: {e}")
+        return {}
+
+    def save_jobs_history(self, jobs_history: Dict[str, bool]):
+        """Save posted jobs to JSON file."""
+        try:
+            with open(JOBS_HISTORY_FILE, 'w', encoding='utf-8') as f:
+                json.dump(jobs_history, f, indent=2, ensure_ascii=False)
+        except Exception as e:
+            logger.error(f"Error saving jobs history: {e}")
+
+    def get_job_key(self, job: Job) -> str:
+        """Generate a unique key for a job to track duplicates."""
+        return f"{job.company}|{job.title}|{job.location}"
 
     def reset_daily_stats(self):
         today = datetime.now().date().isoformat()
@@ -124,20 +129,20 @@ class WagmiBot(commands.Bot):
             self.reset_daily_stats()
             channel = self.get_channel(POSTINGS_CHANNEL_ID)
             if not channel:
-                print(f"Channel with ID {POSTINGS_CHANNEL_ID} not found!")
+                logger.error(f"Channel with ID {POSTINGS_CHANNEL_ID} not found!")
                 return
             
-            jobs_history = load_jobs_history()
-            print("Fetching today's jobs from GitHub...")
+            jobs_history = self.load_jobs_history()
+            logger.info("Fetching today's jobs from GitHub...")
             jobs = await asyncio.to_thread(self.job_scraper.fetch_jobs, only_today=True)
             
             if not jobs:
-                print("No jobs found or error occurred.")
+                logger.info("No jobs found or error occurred.")
                 return
             
             new_jobs_count = 0
             for job in jobs:
-                job_key = get_job_key(job)
+                job_key = self.get_job_key(job)
                 if job_key in jobs_history:
                     continue
                 
@@ -149,18 +154,18 @@ class WagmiBot(commands.Bot):
                 self.stats['total_posted_today'] += 1
                 await asyncio.sleep(1)
             
-            save_jobs_history(jobs_history)
+            self.save_jobs_history(jobs_history)
             if new_jobs_count > 0:
-                print(f"Posted {new_jobs_count} new job(s)!")
+                logger.info(f"Posted {new_jobs_count} new job(s)!")
             else:
-                print("No new jobs to post.")
+                logger.info("No new jobs to post.")
         except Exception as e:
-            print(f"Error in fetch_and_post_jobs: {e}")
+            logger.error(f"Error in fetch_and_post_jobs: {e}")
 
     async def on_ready(self):
         if self.initialized:
             return
-        print(f'{self.user} has logged in!')
+        logger.info(f'{self.user} has logged in!')
         
         self.scheduler.add_job(
             self.fetch_and_post_jobs,
@@ -171,15 +176,81 @@ class WagmiBot(commands.Bot):
         )
         self.scheduler.start()
         self.initialized = True
-        print("Bot is ready and scheduler started.")
+        logger.info("Bot is ready and scheduler started.")
 
     async def setup_hook(self):
-        print("Bot setup hook running...")
-        # We don't auto-sync here to avoid rate limits on Render
+        logger.info("Bot setup hook running...")
 
-# --- INSTANTIATE & COMMANDS ---
+# --- VIEWS ---
 
-# These will be applied to the bot instance created in the main loop
+class LeetCodeView(discord.ui.View):
+    def __init__(self, problems: List[LeetCodeProblem], company: str):
+        super().__init__(timeout=60)
+        self.all_problems = problems
+        self.company = company
+        self.page = 0
+        self.per_page = 10
+        self.sorted_by_freq = False
+        self.problems = problems
+
+    def get_embed(self) -> discord.Embed:
+        start = self.page * self.per_page
+        end = start + self.per_page
+        current_list = self.problems[start:end]
+        
+        total_pages = (len(self.problems) - 1) // self.per_page + 1
+        sort_mode = "Frequency" if self.sorted_by_freq else "Default"
+        
+        embed = discord.Embed(
+            title=f"💻 LeetCode Questions: {self.company.title()}",
+            description=f"Showing top questions for **{self.company.title()}**.\nSorted by: **{sort_mode}**",
+            color=discord.Color.gold(),
+            timestamp=datetime.now()
+        )
+        
+        for i, p in enumerate(current_list, start + 1):
+            diff_emoji = "🟢" if "Easy" in p.difficulty else "🟡" if "Medium" in p.difficulty else "🔴"
+            embed.add_field(
+                name=f"{i}. {p.title}",
+                value=f"{diff_emoji} {p.difficulty} | Acc: {p.acceptance} | Freq: {p.frequency}\n[Link to Problem]({p.url})",
+                inline=False
+            )
+            
+        embed.set_footer(text=f"Page {self.page + 1}/{total_pages} | {len(self.problems)} total")
+        return embed
+
+    @discord.ui.button(label="◀️ Previous", style=discord.ButtonStyle.gray)
+    async def previous(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.page > 0:
+            self.page -= 1
+            await interaction.response.edit_message(embed=self.get_embed(), view=self)
+        else:
+            await interaction.response.defer()
+
+    @discord.ui.button(label="▶️ Next", style=discord.ButtonStyle.gray)
+    async def next(self, interaction: discord.Interaction, button: discord.ui.Button):
+        total_pages = (len(self.problems) - 1) // self.per_page + 1
+        if self.page < total_pages - 1:
+            self.page += 1
+            await interaction.response.edit_message(embed=self.get_embed(), view=self)
+        else:
+            await interaction.response.defer()
+
+    @discord.ui.button(label="📊 Sort by Frequency", style=discord.ButtonStyle.blurple)
+    async def sort(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.sorted_by_freq = not self.sorted_by_freq
+        if self.sorted_by_freq:
+            self.problems = sorted(self.all_problems, key=lambda x: x.freq_value, reverse=True)
+            button.label = "📋 Default Sort"
+        else:
+            self.problems = self.all_problems
+            button.label = "📊 Sort by Frequency"
+        
+        self.page = 0
+        await interaction.response.edit_message(embed=self.get_embed(), view=self)
+
+# --- COMMANDS ---
+
 def register_commands(bot: WagmiBot):
     
     async def check_channel(ctx_or_int) -> bool:
@@ -193,7 +264,6 @@ def register_commands(bot: WagmiBot):
             return False
         return True
 
-    # SLASH COMMANDS
     @bot.tree.command(name='latest', description='Show the 5 most recent tech internship postings')
     async def latest_slash(interaction: discord.Interaction):
         if not await check_channel(interaction): return
@@ -210,14 +280,15 @@ def register_commands(bot: WagmiBot):
                 val = f"📍 {loc} ({job.date_posted})\n🔗 [Apply]({job.link})"
                 embed.add_field(name=f"{i}. {job.company} - {job.title}", value=val, inline=False)
             await interaction.followup.send(embed=embed)
-        except Exception:
+        except Exception as e:
+            logger.error(f"Error in latest command: {e}")
             await interaction.followup.send("❌ Error fetching jobs.")
 
     @bot.tree.command(name='stats', description='Show statistics about jobs posted today')
     async def stats_slash(interaction: discord.Interaction):
         if not await check_channel(interaction): return
         bot.reset_daily_stats()
-        total = len(load_jobs_history())
+        total = len(bot.load_jobs_history())
         embed = discord.Embed(title="📊 Job Bot Statistics", color=discord.Color.green())
         embed.add_field(name="Posted Today", value=str(bot.stats['total_posted_today']))
         embed.add_field(name="Total Tracked", value=str(total))
@@ -241,8 +312,28 @@ def register_commands(bot: WagmiBot):
                 val = f"📍 {loc} ({job.date_posted})\n🔗 [Apply]({job.link})"
                 embed.add_field(name=f"{i}. {job.title}", value=val, inline=False)
             await interaction.followup.send(embed=embed)
-        except Exception:
+        except Exception as e:
+            logger.error(f"Error in company command: {e}")
             await interaction.followup.send("❌ Error searching for jobs.")
+
+    @bot.tree.command(name='leetcode', description='Fetch company leetcode list')
+    @discord.app_commands.describe(company='Company name (e.g., google, amazon)')
+    async def leetcode_slash(interaction: discord.Interaction, company: str):
+        if not await check_channel(interaction): return
+        await interaction.response.defer()
+        try:
+            formatted_name = bot.leetcode_scraper.get_formatted_company_name(company)
+            problems = await asyncio.to_thread(bot.leetcode_scraper.fetch_problems, formatted_name)
+            
+            if not problems:
+                await interaction.followup.send(f"❌ No LeetCode data found for **{company}**.")
+                return
+            
+            view = LeetCodeView(problems, company)
+            await interaction.followup.send(embed=view.get_embed(), view=view)
+        except Exception as e:
+            logger.error(f"Error in leetcode command: {e}")
+            await interaction.followup.send("❌ Error fetching LeetCode questions.")
 
     @bot.tree.command(name='fetch', description='Manually trigger a job search and post new ones')
     async def fetch_slash(interaction: discord.Interaction):
@@ -255,7 +346,6 @@ def register_commands(bot: WagmiBot):
         if not await check_channel(interaction): return
         await interaction.response.send_message("✅ Bot is working!")
 
-    # PREFIX COMMANDS (Fallbacks)
     @bot.command(name='sync')
     @commands.is_owner()
     async def sync_prefix(ctx):
@@ -265,63 +355,13 @@ def register_commands(bot: WagmiBot):
         except Exception as e:
             await ctx.send(f"❌ Sync failed: {e}")
 
-    @bot.command(name='latest')
-    async def latest_prefix(ctx):
-        if not await check_channel(ctx): return
-        async with ctx.typing():
-            try:
-                jobs = await asyncio.to_thread(bot.job_scraper.fetch_jobs, only_today=False)
-                if not jobs:
-                    await ctx.send("❌ No jobs found.")
-                    return
-                latest_5 = jobs[:5]
-                embed = discord.Embed(title="🆕 Latest Tech Internships", color=discord.Color.blue(), timestamp=datetime.now())
-                for i, job in enumerate(latest_5, 1):
-                    loc = job.location or "Not specified"
-                    val = f"📍 {loc} ({job.date_posted})\n🔗 [Apply]({job.link})"
-                    embed.add_field(name=f"{i}. {job.company} - {job.title}", value=val, inline=False)
-                await ctx.send(embed=embed)
-            except Exception:
-                await ctx.send("❌ Error fetching jobs.")
-
-    @bot.command(name='company')
-    async def company_prefix(ctx, *, name: str):
-        if not await check_channel(ctx): return
-        async with ctx.typing():
-            try:
-                jobs = await asyncio.to_thread(bot.job_scraper.fetch_jobs, only_today=False)
-                company_jobs = [j for j in jobs if name.lower() in j.company.lower()]
-                if not company_jobs:
-                    await ctx.send(f"❌ No jobs found for **{name}**.")
-                    return
-                latest_5 = company_jobs[:5]
-                embed = discord.Embed(title=f"🏢 Recent Jobs at {name}", color=discord.Color.blue(), timestamp=datetime.now())
-                for i, job in enumerate(latest_5, 1):
-                    loc = job.location or "Not specified"
-                    val = f"📍 {loc} ({job.date_posted})\n🔗 [Apply]({job.link})"
-                    embed.add_field(name=f"{i}. {job.title}", value=val, inline=False)
-                await ctx.send(embed=embed)
-            except Exception:
-                await ctx.send("❌ Error searching for jobs.")
-
-    @bot.command(name='fetch')
-    async def fetch_prefix(ctx):
-        if not await check_channel(ctx): return
-        await ctx.send("🔄 Fetching jobs...")
-        await bot.fetch_and_post_jobs()
-        await ctx.send("✅ Check completed!")
-
-    @bot.command(name='test')
-    async def test_prefix(ctx):
-        await ctx.send("✅ Bot is online!")
-
 # --- MAIN LOOP ---
 
 async def start_bot():
-    retry_delay = 60  # Initial wait 1 minute
-    max_delay = 600   # Max 10 minutes
+    retry_delay = 60
+    max_delay = 600
     
-    print("Initializing environment...")
+    logger.info("Initializing environment...")
     keep_alive()
     
     while True:
@@ -331,34 +371,30 @@ async def start_bot():
         
         try:
             async with bot_instance:
-                logger.info("Connecting to Discord gateway...")
                 await bot_instance.start(DISCORD_TOKEN)
-            break # If it exits cleanly
+            break
         except discord.errors.HTTPException as e:
             if e.status == 429:
                 logger.error(f"CRITICAL: 429 Too Many Requests (Rate Limited).")
-                logger.info(f"Exponential backoff: waiting {retry_delay}s before next attempt.")
                 await asyncio.sleep(retry_delay)
                 retry_delay = min(retry_delay * 2, max_delay)
             else:
                 logger.error(f"Discord HTTP Error ({e.status}): {e}")
                 await asyncio.sleep(30)
         except Exception as e:
-            logger.error(f"Bot connection or execution error: {type(e).__name__}: {e}")
-            if "Session is closed" in str(e):
-                logger.info("Internal session reset required...")
+            logger.error(f"Bot connection error: {type(e).__name__}: {e}")
             await asyncio.sleep(retry_delay)
             retry_delay = min(retry_delay * 2, max_delay)
         
-        logger.info("Bot instance closed. Cleaning up and preparing for restart...")
+        logger.info("Bot instance closed. Preparing for restart...")
         del bot_instance
 
 if __name__ == '__main__':
     if not DISCORD_TOKEN:
-        print("ERROR: DISCORD_TOKEN is missing!")
+        logger.error("ERROR: DISCORD_TOKEN is missing!")
         exit(1)
     
     try:
         asyncio.run(start_bot())
     except KeyboardInterrupt:
-        print("Bot stopped by user.")
+        logger.info("Bot stopped by user.")
