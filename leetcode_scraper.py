@@ -26,6 +26,7 @@ class LeetCodeScraper:
     """Scrapes LeetCode questions from snehasishroy's repository."""
     
     BASE_RAW_URL = "https://raw.githubusercontent.com/snehasishroy/leetcode-companywise-interview-questions/master"
+    GITHUB_API_ROOT = "https://api.github.com/repos/snehasishroy/leetcode-companywise-interview-questions/contents"
     
     def fetch_problems(self, company: str) -> List[LeetCodeProblem]:
         """
@@ -65,3 +66,22 @@ class LeetCodeScraper:
         """Helper to format user input into repository's company folder format."""
         # Simple transformation, might need more robust handling for special cases
         return name.lower().replace(" ", "-")
+
+    def fetch_company_list(self) -> List[str]:
+        """
+        Fetch company folders from the repository root.
+        These folder names are valid values for fetch_problems().
+        """
+        try:
+            response = requests.get(self.GITHUB_API_ROOT, timeout=10)
+            response.raise_for_status()
+            items = response.json()
+            companies = []
+            for item in items:
+                if item.get("type") == "dir" and item.get("name"):
+                    companies.append(item["name"])
+            companies.sort()
+            return companies
+        except Exception as e:
+            print(f"Error fetching LeetCode company list: {e}")
+            return []

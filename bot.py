@@ -42,6 +42,16 @@ def is_valid_url(url: Optional[str]) -> bool:
     url = url.strip()
     return url.startswith(('http://', 'https://'))
 
+
+def role_accent(title: str) -> tuple[str, discord.Color]:
+    """Return emoji + color accent based on role keywords."""
+    t = (title or "").lower()
+    if any(k in t for k in ['product manager', 'pm intern', 'product management']):
+        return "📊", discord.Color.purple()
+    if any(k in t for k in ['machine learning', 'ai', 'data scientist', 'ml']):
+        return "🤖", discord.Color.teal()
+    return "💼", discord.Color.blurple()
+
 # --- FLASK KEEP-ALIVE ---
 
 app = Flask('')
@@ -111,25 +121,22 @@ class WagmiBot(commands.Bot):
             self.stats['last_reset_date'] = today
 
     def create_job_embed(self, job: Job) -> discord.Embed:
-        emoji = "💼"
-        if any(keyword in job.title.lower() for keyword in ['product manager', 'pm intern', 'product management']):
-            emoji = "📊"
-        
+        emoji, color = role_accent(job.title)
         valid_url = job.link if is_valid_url(job.link) else None
+        location = job.location or "Not specified"
+        posted_date = job.date_posted or "Unknown date"
         embed = discord.Embed(
             title=f"{emoji} {job.title}",
-            description=f"**Company:** {job.company}",
-            color=discord.Color.blue(),
+            description=f"**{job.company}**",
+            color=color,
             url=valid_url,
             timestamp=datetime.now()
         )
-        if job.location:
-            embed.add_field(name="📍 Location", value=job.location, inline=True)
-        if job.date_posted:
-            embed.add_field(name="📅 Date Posted", value=job.date_posted, inline=True)
+        embed.add_field(name="📍 Location", value=location, inline=True)
+        embed.add_field(name="🕒 Posted", value=posted_date, inline=True)
         if valid_url:
-            embed.add_field(name="🔗 Application Link", value=f"[Apply Here]({valid_url})", inline=False)
-        embed.set_footer(text="Job Bot | 30m Updates")
+            embed.add_field(name="🔗 Application", value=f"[Open application]({valid_url})", inline=False)
+        embed.set_footer(text="Wagmi Bot • Auto-updated every 30m")
         return embed
 
     async def fetch_and_post_jobs(self):
@@ -212,8 +219,8 @@ class LeetCodeView(discord.ui.View):
         
         embed = discord.Embed(
             title=f"💻 LeetCode Questions: {self.company.title()}",
-            description=f"Showing top questions for **{self.company.title()}**.\nSorted by: **{sort_mode}**",
-            color=discord.Color.gold(),
+            description=f"Practice set for **{self.company.title()}** • Sort: **{sort_mode}**",
+            color=discord.Color.orange(),
             timestamp=datetime.now()
         )
         
@@ -221,11 +228,11 @@ class LeetCodeView(discord.ui.View):
             diff_emoji = "🟢" if "Easy" in p.difficulty else "🟡" if "Medium" in p.difficulty else "🔴"
             embed.add_field(
                 name=f"{i}. {p.title}",
-                value=f"{diff_emoji} {p.difficulty} | Acc: {p.acceptance} | Freq: {p.frequency}\n[Link to Problem]({p.url})",
+                value=f"{diff_emoji} {p.difficulty}  •  Acc {p.acceptance}  •  Freq {p.frequency}\n[Open problem]({p.url})",
                 inline=False
             )
             
-        embed.set_footer(text=f"Page {self.page + 1}/{total_pages} | {len(self.problems)} total")
+        embed.set_footer(text=f"Page {self.page + 1}/{total_pages} • {len(self.problems)} total questions")
         return embed
 
     @discord.ui.button(label="◀️ Previous", style=discord.ButtonStyle.gray)
@@ -258,9 +265,90 @@ class LeetCodeView(discord.ui.View):
         self.page = 0
         await interaction.response.edit_message(embed=self.get_embed(), view=self)
 
+
+class JobResultsView(discord.ui.View):
+    def __init__(self, jobs: List[Job], title: str, per_page: int = 5):
+        super().__init__(timeout=120)
+        self.jobs = jobs
+        self.page = 0
+        self.per_page = per_page
+        self.title = title
+
+    def get_embed(self) -> discord.Embed:
+        start = self.page * self.per_page
+        end = start + self.per_page
+        current_jobs = self.jobs[start:end]
+        total_pages = max(1, (len(self.jobs) - 1) // self.per_page + 1)
+
+        embed = discord.Embed(
+            title=self.title,
+            color=discord.Color.blurple(),
+            timestamp=datetime.now()
+        )
+
+        for i, job in enumerate(current_jobs, start + 1):
+            loc = job.location or "Not specified"
+            date_value = job.date_posted or "Unknown date"
+            link_value = f"[Apply]({job.link})" if is_valid_url(job.link) else "No valid link"
+            role_emoji, _ = role_accent(job.title)
+            embed.add_field(
+                name=f"{i}. {role_emoji} {job.title}",
+                value=f"**{job.company}**\n📍 {loc}\n🕒 {date_value}\n🔗 {link_value}",
+                inline=False
+            )
+
+        embed.set_footer(text=f"Page {self.page + 1}/{total_pages} • {len(self.jobs)} total jobs")
+        return embed
+
+    @discord.ui.button(label="◀️ Previous", style=discord.ButtonStyle.gray)
+    async def previous(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.page > 0:
+            self.page -= 1
+            await interaction.response.edit_message(embed=self.get_embed(), view=self)
+        else:
+            await interaction.response.defer()
+
+    @discord.ui.button(label="▶️ Next", style=discord.ButtonStyle.gray)
+    async def next(self, interaction: discord.Interaction, button: discord.ui.Button):
+        total_pages = max(1, (len(self.jobs) - 1) // self.per_page + 1)
+        if self.page < total_pages - 1:
+            self.page += 1
+            await interaction.response.edit_message(embed=self.get_embed(), view=self)
+        else:
+            await interaction.response.defer()
+
 # --- COMMANDS ---
 
 def register_commands(bot: WagmiBot):
+    cache = {
+        "companies": [],
+        "companies_ts": 0.0,
+        "leetcode_companies": [],
+        "leetcode_companies_ts": 0.0
+    }
+
+    COMPANY_CACHE_TTL_SECONDS = 300
+    LEETCODE_COMPANY_CACHE_TTL_SECONDS = 3600
+
+    async def get_job_companies() -> List[str]:
+        now_ts = time.time()
+        if cache["companies"] and (now_ts - cache["companies_ts"] < COMPANY_CACHE_TTL_SECONDS):
+            return cache["companies"]
+        jobs = await asyncio.to_thread(bot.job_scraper.fetch_jobs, False)
+        company_set = {job.company for job in jobs if job.company}
+        companies = sorted(company_set)
+        cache["companies"] = companies
+        cache["companies_ts"] = now_ts
+        return companies
+
+    async def get_leetcode_companies() -> List[str]:
+        now_ts = time.time()
+        if cache["leetcode_companies"] and (now_ts - cache["leetcode_companies_ts"] < LEETCODE_COMPANY_CACHE_TTL_SECONDS):
+            return cache["leetcode_companies"]
+        companies = await asyncio.to_thread(bot.leetcode_scraper.fetch_company_list)
+        cache["leetcode_companies"] = companies
+        cache["leetcode_companies_ts"] = now_ts
+        return companies
     
     async def check_channel(ctx_or_int) -> bool:
         channel_id = getattr(ctx_or_int, 'channel_id', getattr(ctx_or_int, 'channel', None).id if hasattr(ctx_or_int, 'channel') else 0)
@@ -282,13 +370,8 @@ def register_commands(bot: WagmiBot):
             if not jobs:
                 await interaction.followup.send("❌ No jobs found.")
                 return
-            latest_5 = jobs[:5]
-            embed = discord.Embed(title="🆕 Latest Tech Internships", color=discord.Color.blue(), timestamp=datetime.now())
-            for i, job in enumerate(latest_5, 1):
-                loc = job.location or "Not specified"
-                val = f"📍 {loc} ({job.date_posted})\n🔗 [Apply]({job.link})"
-                embed.add_field(name=f"{i}. {job.company} - {job.title}", value=val, inline=False)
-            await interaction.followup.send(embed=embed)
+            view = JobResultsView(jobs, "🆕 Latest Tech Internships", per_page=5)
+            await interaction.followup.send(embed=view.get_embed(), view=view)
         except Exception as e:
             logger.error(f"Error in latest command: {e}")
             await interaction.followup.send("❌ Error fetching jobs.")
@@ -314,13 +397,8 @@ def register_commands(bot: WagmiBot):
             if not company_jobs:
                 await interaction.followup.send(f"❌ No jobs found for **{name}**.")
                 return
-            latest_5 = company_jobs[:5]
-            embed = discord.Embed(title=f"🏢 Recent Jobs at {name}", color=discord.Color.blue(), timestamp=datetime.now())
-            for i, job in enumerate(latest_5, 1):
-                loc = job.location or "Not specified"
-                val = f"📍 {loc} ({job.date_posted})\n🔗 [Apply]({job.link})"
-                embed.add_field(name=f"{i}. {job.title}", value=val, inline=False)
-            await interaction.followup.send(embed=embed)
+            view = JobResultsView(company_jobs, f"🏢 Recent Jobs at {name}", per_page=5)
+            await interaction.followup.send(embed=view.get_embed(), view=view)
         except Exception as e:
             logger.error(f"Error in company command: {e}")
             await interaction.followup.send("❌ Error searching for jobs.")
@@ -343,6 +421,32 @@ def register_commands(bot: WagmiBot):
         except Exception as e:
             logger.error(f"Error in leetcode command: {e}")
             await interaction.followup.send("❌ Error fetching LeetCode questions.")
+
+    @company_slash.autocomplete('name')
+    async def company_autocomplete(interaction: discord.Interaction, current: str):
+        companies = await get_job_companies()
+        current_lower = current.lower().strip()
+        if current_lower:
+            matches = [c for c in companies if current_lower in c.lower()]
+        else:
+            matches = companies
+        return [
+            discord.app_commands.Choice(name=company[:100], value=company)
+            for company in matches[:25]
+        ]
+
+    @leetcode_slash.autocomplete('company')
+    async def leetcode_company_autocomplete(interaction: discord.Interaction, current: str):
+        companies = await get_leetcode_companies()
+        current_lower = current.lower().strip()
+        if current_lower:
+            matches = [c for c in companies if current_lower in c.lower()]
+        else:
+            matches = companies
+        return [
+            discord.app_commands.Choice(name=company[:100], value=company)
+            for company in matches[:25]
+        ]
 
     @bot.tree.command(name='fetch', description='Manually trigger a job search and post new ones')
     async def fetch_slash(interaction: discord.Interaction):
