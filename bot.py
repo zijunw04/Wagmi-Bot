@@ -249,6 +249,28 @@ class WagmiBot(commands.Bot):
         self.scheduler.start()
         self.initialized = True
         logger.info("Bot is ready and scheduler started (30 minute intervals).")
+        self.loop.create_task(self._post_ready_setup())
+
+    async def _post_ready_setup(self):
+        """Sync commands and warm caches after Discord is fully connected."""
+        await asyncio.sleep(2)
+        try:
+            count = await self.sync_slash_commands()
+            logger.info(f"Production command sync complete: {count} global command(s)")
+            for guild in self.guilds:
+                try:
+                    await self.clear_guild_commands(guild)
+                except Exception as e:
+                    logger.warning(f"Could not clear guild commands for {guild.id}: {e}")
+        except Exception as e:
+            logger.error(f"Command sync failed on startup: {e}")
+
+        warm = getattr(self, "warm_autocomplete_cache", None)
+        if warm:
+            try:
+                await warm()
+            except Exception as e:
+                logger.warning(f"Autocomplete cache warm failed: {e}")
 
     async def clear_guild_commands(self, guild: discord.abc.Snowflake) -> None:
         """Remove guild-scoped commands so they don't duplicate global ones."""
@@ -282,15 +304,7 @@ class WagmiBot(commands.Bot):
         return len(synced)
 
     async def setup_hook(self):
-        logger.info("Bot setup hook running...")
-        try:
-            if DEV_GUILD_ID:
-                dev_guild = discord.Object(id=int(DEV_GUILD_ID))
-                await self.sync_slash_commands(dev_guild, guild_only=True)
-            else:
-                await self.sync_slash_commands()
-        except Exception as e:
-            logger.error(f"Command sync failed on startup: {e}")
+        logger.info("Bot setup hook running (command sync happens in on_ready)...")
 
 
 class LeetCodeView(discord.ui.View):
@@ -497,35 +511,66 @@ def register_commands(bot: WagmiBot):
     LEETCODE_CACHE_TTL = 3600
     COUNTRY_CACHE_TTL = 600
 
+    AUTOCOMPLETE_TIMEOUT = 2.5
+
     async def get_job_companies() -> List[str]:
         now_ts = time.time()
         if cache["companies"] and (now_ts - cache["companies_ts"] < COMPANY_CACHE_TTL):
             return cache["companies"]
-        jobs = await asyncio.to_thread(bot.job_scraper.fetch_jobs, False)
-        companies = sorted({job.company for job in jobs if job.company})
-        cache["companies"] = companies
-        cache["companies_ts"] = now_ts
-        return companies
+        try:
+            jobs = await asyncio.wait_for(
+                asyncio.to_thread(bot.job_scraper.fetch_jobs, False),
+                timeout=AUTOCOMPLETE_TIMEOUT,
+            )
+            companies = sorted({job.company for job in jobs if job.company})
+            cache["companies"] = companies
+            cache["companies_ts"] = now_ts
+            return companies
+        except Exception as e:
+            logger.warning(f"Company autocomplete fetch failed: {e}")
+            return cache["companies"]
 
     async def get_leetcode_companies() -> List[str]:
         now_ts = time.time()
         if cache["leetcode_companies"] and (now_ts - cache["leetcode_companies_ts"] < LEETCODE_CACHE_TTL):
             return cache["leetcode_companies"]
-        companies = await asyncio.to_thread(bot.leetcode_scraper.fetch_company_list)
-        cache["leetcode_companies"] = companies
-        cache["leetcode_companies_ts"] = now_ts
-        return companies
+        try:
+            companies = await asyncio.wait_for(
+                asyncio.to_thread(bot.leetcode_scraper.fetch_company_list),
+                timeout=AUTOCOMPLETE_TIMEOUT,
+            )
+            cache["leetcode_companies"] = companies
+            cache["leetcode_companies_ts"] = now_ts
+            return companies
+        except Exception as e:
+            logger.warning(f"LeetCode autocomplete fetch failed: {e}")
+            return cache["leetcode_companies"]
 
     async def get_country_options() -> List[str]:
         now_ts = time.time()
         if cache["countries"] and (now_ts - cache["countries_ts"] < COUNTRY_CACHE_TTL):
             return cache["countries"]
-        jobs = await asyncio.to_thread(bot.job_scraper.fetch_jobs, False)
-        detected = extract_countries_from_jobs(jobs)
-        all_options = sorted(set(list(COUNTRY_PATTERNS.keys()) + detected))
-        cache["countries"] = all_options
-        cache["countries_ts"] = now_ts
-        return all_options
+        try:
+            jobs = await asyncio.wait_for(
+                asyncio.to_thread(bot.job_scraper.fetch_jobs, False),
+                timeout=AUTOCOMPLETE_TIMEOUT,
+            )
+            detected = extract_countries_from_jobs(jobs)
+            all_options = sorted(set(list(COUNTRY_PATTERNS.keys()) + detected))
+            cache["countries"] = all_options
+            cache["countries_ts"] = now_ts
+            return all_options
+        except Exception as e:
+            logger.warning(f"Region autocomplete fetch failed: {e}")
+            return cache["countries"] or sorted(COUNTRY_PATTERNS.keys())
+
+    async def warm_autocomplete_cache():
+        await get_job_companies()
+        await get_country_options()
+        await get_leetcode_companies()
+        logger.info("Autocomplete caches warmed for production")
+
+    bot.warm_autocomplete_cache = warm_autocomplete_cache
 
     @bot.tree.command(name="setup", description="Configure posting channels for this server")
     async def setup_slash(interaction: discord.Interaction):
@@ -677,19 +722,34 @@ def register_commands(bot: WagmiBot):
     @filter_remove.autocomplete("value")
     async def filter_value_autocomplete(interaction: discord.Interaction, current: str):
         filter_type = getattr(interaction.namespace, "filter_type", None)
-        if filter_type == "company":
-            companies = await get_job_companies()
-            matches = autocomplete_matches(companies, current)
-            return [
-                discord.app_commands.Choice(name=c[:100], value=c) for c in matches
-            ]
-        if filter_type == "region":
-            options = await get_country_options()
-            matches = autocomplete_matches(options, current)
-            return [
-                discord.app_commands.Choice(name=c[:100], value=c) for c in matches
-            ]
-        return []
+        try:
+            if filter_type == "company":
+                companies = await get_job_companies()
+                matches = autocomplete_matches(companies, current)
+                return [
+                    discord.app_commands.Choice(name=f"🏢 {c[:98]}", value=c)
+                    for c in matches
+                ]
+            if filter_type == "region":
+                options = await get_country_options()
+                matches = autocomplete_matches(options, current)
+                return [
+                    discord.app_commands.Choice(name=f"🌍 {r[:98]}", value=r)
+                    for r in matches
+                ]
+            # filter_type not selected yet — show both so dropdown isn't empty
+            companies, regions = await asyncio.gather(
+                get_job_companies(), get_country_options()
+            )
+            choices: List[discord.app_commands.Choice] = []
+            for c in autocomplete_matches(companies, current)[:13]:
+                choices.append(discord.app_commands.Choice(name=f"🏢 {c[:98]}", value=c))
+            for r in autocomplete_matches(regions, current)[:12]:
+                choices.append(discord.app_commands.Choice(name=f"🌍 {r[:98]}", value=r))
+            return choices[:25]
+        except Exception as e:
+            logger.error(f"Filter autocomplete error: {e}")
+            return []
 
     @bot.tree.command(name="latest", description="Show the 5 most recent tech internship postings")
     async def latest_slash(interaction: discord.Interaction):
@@ -778,12 +838,7 @@ def register_commands(bot: WagmiBot):
         await interaction.response.send_message("✅ Bot is working! Supabase: ✅ connected")
 
     @bot.tree.command(name="sync", description="Re-register slash commands (bot owner only)")
-    @discord.app_commands.describe(scope="How to sync commands")
-    @discord.app_commands.choices(scope=[
-        discord.app_commands.Choice(name="Global (recommended)", value="global"),
-        discord.app_commands.Choice(name="This server only (dev)", value="guild"),
-    ])
-    async def sync_slash(interaction: discord.Interaction, scope: str = "global"):
+    async def sync_slash(interaction: discord.Interaction):
         if not await user_is_bot_owner(bot, interaction.user):
             await interaction.response.send_message(
                 "❌ Only the bot owner can run this.", ephemeral=True
@@ -791,23 +846,14 @@ def register_commands(bot: WagmiBot):
             return
         await interaction.response.defer(ephemeral=True)
         try:
-            if scope == "guild":
-                if not interaction.guild:
-                    await interaction.followup.send("❌ Use this in a server for guild sync.")
-                    return
-                count = await bot.sync_slash_commands(interaction.guild, guild_only=True)
-                await interaction.followup.send(
-                    f"✅ Guild-only sync: **{count}** command(s). "
-                    "Global commands were cleared to avoid duplicates."
-                )
-            else:
-                if interaction.guild:
-                    await bot.clear_guild_commands(interaction.guild)
-                count = await bot.sync_slash_commands()
-                await interaction.followup.send(
-                    f"✅ Global sync: **{count}** command(s). "
-                    "Guild duplicates in this server were removed."
-                )
+            if interaction.guild:
+                await bot.clear_guild_commands(interaction.guild)
+            count = await bot.sync_slash_commands()
+            await interaction.followup.send(
+                f"✅ Global sync: **{count}** command(s).\n"
+                "Dropdowns may take **5–60 minutes** to update everywhere.\n"
+                "Restart Discord if options still look old."
+            )
         except Exception as e:
             logger.error(f"Sync failed: {e}")
             await interaction.followup.send(f"❌ Sync failed: {e}")
@@ -819,20 +865,18 @@ def register_commands(bot: WagmiBot):
             return
         try:
             if scope.lower() == "guild" and ctx.guild:
-                count = await bot.sync_slash_commands(ctx.guild, guild_only=True)
                 await ctx.send(
-                    f"✅ Guild-only sync: **{count}** command(s).\n"
-                    "Global commands were cleared to avoid duplicates."
+                    "⚠️ **Avoid `!sync guild` in production** — it deletes global commands.\n"
+                    "Use `!sync` (global) instead. Running global sync now..."
                 )
-            else:
-                if ctx.guild:
-                    await bot.clear_guild_commands(ctx.guild)
-                count = await bot.sync_slash_commands()
-                await ctx.send(
-                    f"✅ Global sync: **{count}** command(s).\n"
-                    "Guild duplicates in this server were removed. "
-                    "Commands may take a few minutes to update globally."
-                )
+            if ctx.guild:
+                await bot.clear_guild_commands(ctx.guild)
+            count = await bot.sync_slash_commands()
+            await ctx.send(
+                f"✅ Global sync: **{count}** command(s).\n"
+                "Dropdowns may take **5–60 minutes** to update on Discord's side.\n"
+                "Restart Discord (Ctrl+R) if options still look old."
+            )
         except Exception as e:
             logger.error(f"Sync failed: {e}")
             await ctx.send(f"❌ Sync failed: {e}")
